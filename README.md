@@ -107,3 +107,9 @@ committed credential, certificate verification switched off. Anything merely
 worth a look is `WARNING`. A rulepack that cries wolf at ERROR gets
 `fail-on-error` switched off, and then the rules that should stop a merge no
 longer do.
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE). Semgrep is installed at runtime
+from PyPI and licensed separately by Semgrep, Inc.; it is not redistributed
+here.

@@ -1,0 +1,8 @@
+FORCE Code Audit
+Copyright 2026 Big One Platforms, Inc.
+
+This product includes software developed at Big One Platforms, Inc.
+
+The bundled Semgrep rulepack (rulepack/force-compliance.yml) is original work.
+Semgrep itself is installed at runtime from PyPI and is licensed separately by
+Semgrep, Inc.; it is not redistributed here.
