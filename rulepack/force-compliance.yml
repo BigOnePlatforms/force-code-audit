@@ -1,0 +1,250 @@
+# FORCE compliance rulepack.
+#
+# These are not a replacement for a general SAST ruleset — point `extra-config`
+# at p/security-audit or your own rules for that. These are the patterns an
+# assessor asks about directly, where a finding maps cleanly onto a control an
+# SSP has to answer for. Each rule carries its control bundle in metadata for
+# humans reading the SARIF; FORCE re-derives the mapping server-side from the
+# rule id, so a correction there does not require bumping the pinned action.
+#
+# Severity discipline: ERROR is reserved for findings that are evidence of a
+# control FAILING (a committed credential, disabled certificate verification).
+# A pattern that is merely worth a look is WARNING, because a rulepack that
+# cries wolf at ERROR gets `fail-on-error` switched off, and then the rules
+# that should stop a merge no longer do.
+
+rules:
+  # Split by language rather than listing all four on one rule: Go's := does
+  # not parse as TypeScript, and Semgrep validates every pattern against every
+  # declared language, so the combined rule is rejected outright.
+  - id: force.secrets.hardcoded-credential
+    languages: [typescript, javascript, python]
+    severity: ERROR
+    message: >
+      Hardcoded credential. Authenticators must be provisioned, not committed
+      (800-171 03.05.12). Move it to Secrets Manager and rotate the exposed value.
+    metadata:
+      force-controls: SECRET_EXPOSURE
+      confidence: MEDIUM
+    patterns:
+      - pattern: $KEY = "..."
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: (?i).*(secret|password|passwd|api_?key|access_?key|private_?key|token|credential).*
+      - metavariable-regex:
+          metavariable: $KEY
+          # Names that describe the slot rather than hold a value. Case-
+          # insensitive: secretName / tokenPath / apiKeyHeader are all
+          # slot names, and a case-sensitive exclusion flags every one.
+          regex: (?i)^(?!.*(name|path|env|header|field|type|id|prefix|url|pattern|label|key_?id)$).*$
+      - pattern-not: $KEY = ""
+      - pattern-not: $KEY = "..." + $X
+
+  - id: force.secrets.hardcoded-credential-go
+    languages: [go]
+    severity: ERROR
+    message: >
+      Hardcoded credential. Authenticators must be provisioned, not committed
+      (800-171 03.05.12). Move it to Secrets Manager and rotate the exposed value.
+    metadata:
+      force-controls: SECRET_EXPOSURE
+      confidence: MEDIUM
+    patterns:
+      - pattern-either:
+          - pattern: $KEY := "..."
+          - pattern: $KEY = "..."
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: (?i).*(secret|password|passwd|api_?key|access_?key|private_?key|token|credential).*
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: (?i)^(?!.*(name|path|env|header|field|type|id|prefix|url|pattern|label|key_?id)$).*$
+      - pattern-not: $KEY := ""
+
+  # WARNING, not ERROR, and the message no longer asserts a security purpose.
+  # Dogfooding this against force-web returned three SHA-1 hits: two compute
+  # Azure certificate thumbprints, which Microsoft DEFINES as SHA-1 of the DER
+  # — protocol-mandated, not a choice — and the third derives an id suffix.
+  # A rule that cannot see the purpose cannot call the control failed, and
+  # ERROR on a protocol-mandated call is how fail-on-error gets switched off.
+  - id: force.crypto.weak-hash
+    languages: [typescript, javascript, python]
+    severity: WARNING
+    message: >
+      MD5/SHA-1. If this protects CUI, FIPS-validated cryptography is required
+      (800-171 03.13.11, SC-13) — use SHA-256 or stronger. Interoperability-
+      mandated uses (Azure certificate thumbprints, legacy protocol digests)
+      are an accepted exception; record the justification.
+    metadata:
+      force-controls: VULN,SECURE_DEV
+    pattern-either:
+      - pattern: crypto.createHash("md5")
+      - pattern: crypto.createHash("sha1")
+      - pattern: hashlib.md5(...)
+      - pattern: hashlib.sha1(...)
+
+  - id: force.tls.verification-disabled
+    languages: [typescript, javascript, python]
+    severity: ERROR
+    message: >
+      TLS certificate verification disabled. This breaks the protected-channel
+      requirement for CUI in transit (800-171 03.13.08 / SC-8).
+    metadata:
+      force-controls: EXPOSURE
+    pattern-either:
+      - pattern: "rejectUnauthorized: false"
+      - pattern: process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0"
+      - pattern: requests.$M(..., verify=False, ...)
+      - pattern: ssl._create_unverified_context(...)
+
+  - id: force.crypto.insecure-random-for-secret
+    languages: [typescript, javascript, python]
+    severity: ERROR
+    message: >
+      Non-cryptographic randomness used to generate a token or key. Use
+      crypto.randomBytes / secrets.token_bytes (800-171 03.05.12).
+    metadata:
+      force-controls: SECRET_EXPOSURE
+    patterns:
+      - pattern-either:
+          - pattern: $VAR = Math.random()
+          - pattern: $VAR = random.random()
+          - pattern: $VAR = random.randint(...)
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: (?i).*(token|secret|key|nonce|salt|session|password).*
+
+  - id: force.injection.sql-string-concat
+    languages: [typescript, javascript, python]
+    severity: WARNING
+    message: >
+      SQL assembled by string concatenation. Use parameterised queries
+      (flaw remediation, 800-171 03.14.01).
+    metadata:
+      force-controls: VULN
+    pattern-either:
+      - pattern: $DB.query("..." + $X, ...)
+      - pattern: $DB.execute("..." + $X, ...)
+      - pattern: $DB.raw("..." + $X, ...)
+
+  - id: force.injection.shell-from-input
+    languages: [typescript, javascript, python]
+    severity: ERROR
+    message: >
+      Shell command built from a non-literal value. Use an argument array
+      rather than a shell string (800-171 03.14.01).
+    metadata:
+      force-controls: VULN
+    pattern-either:
+      - pattern: child_process.exec($CMD, ...)
+      - pattern: child_process.execSync($CMD, ...)
+      - pattern: subprocess.$M(..., shell=True, ...)
+
+  - id: force.logging.sensitive-value
+    languages: [typescript, javascript, python]
+    severity: WARNING
+    message: >
+      A credential-shaped value is being logged. Audit records must not become
+      a secondary store of authenticators (800-171 03.03.01, 03.05.12).
+    metadata:
+      force-controls: AUDIT,SECRET_EXPOSURE
+    patterns:
+      - pattern-either:
+          - pattern: console.$M(..., $VAR, ...)
+          - pattern: logger.$M(..., $VAR, ...)
+          - pattern: print(..., $VAR, ...)
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: (?i)^(password|secret|token|apikey|api_key|private_key|credential|ssn).*
+
+  - id: force.boundary.commercial-endpoint-in-gov-path
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >
+      A commercial AWS endpoint is referenced from code that also handles CUI.
+      CUI processing must stay in the authorized GovCloud boundary
+      (800-171 03.01.03, control of CUI flow).
+    metadata:
+      force-controls: EXPOSURE
+    patterns:
+      - pattern-regex: \.(us-east-1|us-west-2)\.amazonaws\.com
+      - pattern-not-regex: (?i)(test|spec|fixture|mock|example)
+
+  # INFO, because precision is inherently low: whether a route is protected
+  # can live in middleware this rule cannot see, and a deliberately public
+  # route (login, a signed webhook) is correct code. 31 hits on force-web,
+  # nearly all intentional, is the shape that trains people to ignore a rule.
+  # It stays in the pack because an unprotected route is a real finding when
+  # it is one — it just is not evidence of a failed control on its own.
+  - id: force.authz.route-without-auth-check
+    languages: [typescript]
+    severity: INFO
+    message: >
+      API route handler with no authorization check visible in the handler.
+      Confirm the gate is applied in middleware, that the route is
+      deliberately public, or add a handler-side check
+      (800-171 03.01.01 / 03.01.05).
+    metadata:
+      force-controls: LEAST_PRIV
+    patterns:
+      - pattern: |
+          export async function $METHOD($REQ) { ... }
+      - metavariable-regex:
+          metavariable: $METHOD
+          regex: ^(GET|POST|PUT|PATCH|DELETE)$
+      # The exclusion has to name the whole handler, not a bare `... call ...`:
+      # a sequence ellipsis is not a valid pattern on its own, only inside a
+      # block. Each of these says "this handler DOES check" and drops it.
+      - pattern-not: |
+          export async function $METHOD($REQ) {
+            ...
+            requirePermission(...)
+            ...
+          }
+      - pattern-not: |
+          export async function $METHOD($REQ) {
+            ...
+            requireRole(...)
+            ...
+          }
+      - pattern-not: |
+          export async function $METHOD($REQ) {
+            ...
+            requireSession(...)
+            ...
+          }
+      - pattern-not: |
+          export async function $METHOD($REQ) {
+            ...
+            getServerSession(...)
+            ...
+          }
+      - pattern-not: |
+          export async function $METHOD($REQ) {
+            ...
+            verifySignature(...)
+            ...
+          }
+      - pattern-not: |
+          export async function $METHOD($REQ) {
+            ...
+            verifyWebhookSignature(...)
+            ...
+          }
+      - pattern-not: |
+          export async function $METHOD($REQ) {
+            ...
+            timingSafeEqual(...)
+            ...
+          }
+
+  - id: force.change.suppressed-security-lint
+    languages: [typescript, javascript]
+    severity: WARNING
+    message: >
+      A security lint rule is suppressed inline. Suppressions need a recorded
+      justification to survive a configuration-change review
+      (800-171 03.04.03).
+    metadata:
+      force-controls: CHANGE
+    pattern-regex: (?i)//\s*(eslint-disable|semgrep|nosemgrep).*(security|injection|xss|csrf|crypto)

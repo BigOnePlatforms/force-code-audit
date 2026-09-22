@@ -1,0 +1,4 @@
+# The fixtures carry a plausible AWS key, a shell-injection call and a weak
+# digest ON PURPOSE — they are how verify-rulepack.sh proves the rules fire.
+# Explicit targets still scan, so the verifier is unaffected.
+fixtures/

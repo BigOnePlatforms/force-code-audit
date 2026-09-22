@@ -1,0 +1,119 @@
+# FORCE Code Audit — static analysis that runs where the code already is.
+#
+# The FORCE collector deliberately cannot read customer source: the GitHub App
+# manifest has no Contents permission, github-alert-redact allow-lists the
+# fields that may be stored, and a CI test asserts no repository content ever
+# reaches a model. Those guarantees are the product, so auditing code could not
+# be done by widening them.
+#
+# This Action inverts the direction instead. Semgrep runs in the customer's own
+# runner, against a checkout they already trust it with, and only a COUNT-LEVEL
+# summary leaves the boundary — rule ids, severities and control mappings, with
+# no file path, line number, snippet or commit sha. The customer's developers
+# get the full detail as a SARIF artifact in their own repository, where the
+# fixing actually happens.
+#
+# On pull_request it scans the diff, which is what makes "audit new code before
+# it merges" a property of the Action rather than a feature FORCE has to build.
+
+name: FORCE Code Audit
+description: Compliance-mapped static analysis. Findings go to FORCE; source never leaves your runner.
+author: Big One Platforms, Inc.
+
+inputs:
+  force-url:
+    description: FORCE base URL (e.g. https://gov.bigforceone.com).
+    required: true
+  connection-id:
+    description: The FORCE GitHub connection id this repository reports under.
+    required: true
+  audit-secret:
+    description: >
+      Shared secret for signing the report. Store it as a repository or
+      organization Actions secret and pass it as ${{ secrets.FORCE_AUDIT_SECRET }};
+      never inline it. It signs the report body — it is not a bearer token, so a
+      captured report cannot be replayed against a different body.
+    required: true
+  scope:
+    description: '"changed" scans the PR diff; "full" scans the whole tree.'
+    required: false
+    default: changed
+  extra-config:
+    description: Additional Semgrep config (registry ref or path), appended to the FORCE rulepack.
+    required: false
+    default: ""
+  fail-on-error:
+    description: Fail the job when ERROR-severity findings exist. Reporting to FORCE happens either way.
+    required: false
+    default: "false"
+
+outputs:
+  error-count:
+    description: Number of ERROR-severity findings.
+    value: ${{ steps.summarize.outputs.error-count }}
+  reported:
+    description: "true when FORCE accepted the report."
+    value: ${{ steps.summarize.outputs.reported }}
+
+runs:
+  using: composite
+  steps:
+    # Full history only when scanning a diff — Semgrep needs the merge base.
+    - name: Fetch merge base
+      if: inputs.scope == 'changed' && github.event_name == 'pull_request'
+      shell: bash
+      run: git fetch --no-tags --depth=1 origin "${{ github.event.pull_request.base.ref }}"
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install Semgrep
+      shell: bash
+      run: pip install --quiet --disable-pip-version-check semgrep==1.97.0
+
+    # --no-error so a finding does not abort the run before reporting; the
+    # fail-on-error input decides the job's fate after FORCE has the evidence.
+    # Reporting a red build is more valuable to an assessor than not reporting.
+    - name: Run Semgrep
+      shell: bash
+      env:
+        BASE_REF: ${{ github.event.pull_request.base.ref }}
+        SCOPE: ${{ inputs.scope }}
+        EXTRA: ${{ inputs.extra-config }}
+      run: |
+        set -euo pipefail
+        args=(--config "${{ github.action_path }}/rulepack/force-compliance.yml")
+        [ -n "$EXTRA" ] && args+=(--config "$EXTRA")
+        if [ "$SCOPE" = "changed" ] && [ -n "${BASE_REF:-}" ]; then
+          args+=(--baseline-commit "origin/$BASE_REF")
+        fi
+        semgrep scan "${args[@]}" --sarif --output semgrep.sarif --no-error --quiet
+
+    # The customer's copy: full paths and line numbers, in their repository.
+    - name: Upload SARIF artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: force-code-audit-sarif
+        path: semgrep.sarif
+        retention-days: 30
+      continue-on-error: true
+
+    - name: Summarize and report
+      id: summarize
+      shell: bash
+      env:
+        FORCE_URL: ${{ inputs.force-url }}
+        FORCE_CONNECTION_ID: ${{ inputs.connection-id }}
+        FORCE_AUDIT_SECRET: ${{ inputs.audit-secret }}
+        FORCE_SCOPE: ${{ inputs.scope }}
+        GITHUB_REPO_NAME: ${{ github.event.repository.name }}
+      run: node "${{ github.action_path }}/summarize.mjs" semgrep.sarif
+
+    - name: Fail on ERROR findings
+      if: inputs.fail-on-error == 'true' && steps.summarize.outputs.error-count != '0'
+      shell: bash
+      run: |
+        echo "::error::${{ steps.summarize.outputs.error-count }} ERROR-severity finding(s). See the force-code-audit-sarif artifact."
+        exit 1
