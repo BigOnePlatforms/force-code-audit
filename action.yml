@@ -30,9 +30,13 @@ inputs:
   audit-secret:
     description: >
       Shared secret for signing the report. Store it as a repository or
-      organization Actions secret and pass it as ${{ secrets.FORCE_AUDIT_SECRET }};
-      never inline it. It signs the report body — it is not a bearer token, so a
-      captured report cannot be replayed against a different body.
+      organization Actions secret named FORCE_AUDIT_SECRET and pass it from the
+      secrets context; never inline it. (Written without expression syntax on
+      purpose: GitHub evaluates expressions in this description, and `secrets`
+      is not a context an action definition can reach, so the literal form here
+      stops the action loading at all.) It signs the report body — it is not a
+      bearer token, so a captured report cannot be replayed against a different
+      body.
     required: true
   scope:
     description: '"changed" scans the PR diff; "full" scans the whole tree.'
@@ -71,7 +75,9 @@ runs:
 
     - name: Install Semgrep
       shell: bash
-      run: pip install --quiet --disable-pip-version-check semgrep==1.97.0
+      # setuptools is explicit: it is no longer installed by default, and
+      # Semgrep's dependency chain still imports pkg_resources.
+      run: pip install --quiet --disable-pip-version-check setuptools semgrep==1.177.0
 
     # --no-error so a finding does not abort the run before reporting; the
     # fail-on-error input decides the job's fate after FORCE has the evidence.
